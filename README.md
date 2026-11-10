@@ -1,4 +1,4 @@
-# rrl-krb
+# rrl-krb-common
 
 Kerberos on the wire: the structures a KDC and an acceptor have to agree about.
 

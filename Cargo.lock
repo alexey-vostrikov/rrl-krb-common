@@ -195,7 +195,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rrl-krb"
+name = "rrl-krb-common"
 version = "0.1.0"
 dependencies = [
  "hex",
