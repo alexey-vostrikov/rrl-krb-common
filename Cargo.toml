@@ -1,0 +1,34 @@
+[package]
+name = "rrl-krb"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+description = "Kerberos on the wire: ASN.1 DER, the RFC 4120 messages, and the MS-PAC — the structures a KDC and an acceptor have to agree about, in one place"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/alexey-vostrikov/rrl-krb"
+
+[dependencies]
+# Key derivation and the profile: a PAC is signed with the same HMAC construction a ticket is,
+# so this crate sits on top of the crypto rather than beside it.
+rrl-crypto = { git = "https://github.com/alexey-vostrikov/rrl-crypto", branch = "main" }
+# The PAC's own signatures. `KERB_CHECKSUM_HMAC_MD5` is MD5 by protocol (MS-PAC §2.8), not by
+# choice, and the older AES signatures use HMAC-SHA1 — the same crates `rrl-crypto` already pulls,
+# so this adds no new tree.
+hmac = "0.13"
+md-5 = "0.11"
+sha1 = "0.11"
+sha2 = "0.11"
+# A principal as `name@REALM` in JSON, which is how an administrator writes one.
+serde = { version = "1", features = ["derive"], optional = true }
+
+[features]
+serde = ["dep:serde"]
+
+[dev-dependencies]
+hex = "0.4"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
