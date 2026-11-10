@@ -350,8 +350,8 @@ fn sign(pac: &[u8], key: &Key, signature: SignatureType) -> Result<Vec<u8>> {
             // RC4-HMAC's key derivation is its own: the "key" is the exported key
             // of an RC4 key, and the salt is the usage number as a little-endian
             // word. This is what RFC 4757 defines and what every AD writes.
-            let usage = KERB_NON_KERB_CKSUM_SALT.to_le_bytes();
-            hmac_md5(key.bytes(), pac, &usage)?
+            let usage = KERB_NON_KERB_CKSUM_SALT;
+            rrl_crypto::checksum::kerb_checksum_hmac_md5(key.bytes(), usage, pac).to_vec()
         }
         SignatureType::HmacSha1_96Aes(_)
         | SignatureType::HmacSha256_128Aes
@@ -430,35 +430,6 @@ fn buffers_of(pac: &[u8]) -> Option<Vec<(u32, u32, usize)>> {
         buffers.push((kind, size, offset));
     }
     Some(buffers)
-}
-
-/// `KERB_CHECKSUM_HMAC_MD5` as RFC 4757 §7 defines it, which is not a plain
-/// HMAC-MD5 over the message.
-///
-/// Two steps, and skipping either produces a signature that verifies nowhere:
-/// `Ksign = HMAC-MD5(key, "signaturekey\0")`, then
-/// `MD5(usage little-endian || data)` is what gets HMACed under `Ksign`. The inner
-/// MD5 is there so that a signature over a long message costs one hash of it, and
-/// the usage word is little-endian because that is the wire order RC4-HMAC uses
-/// everywhere else.
-fn hmac_md5(key: &[u8], data: &[u8], usage: &[u8; 4]) -> Result<Vec<u8>> {
-    use hmac::{Hmac, KeyInit, Mac};
-    use md5::{Digest, Md5};
-    const SIGNATURE_KEY: &[u8] = b"signaturekey\0";
-    let mut ksign = <Hmac<Md5> as KeyInit>::new_from_slice(key)
-        .map_err(|_| Error::Crypto("HMAC-MD5 key".into()))?;
-    ksign.update(SIGNATURE_KEY);
-    let ksign = ksign.finalize().into_bytes();
-
-    let mut inner = Md5::new();
-    inner.update(usage);
-    inner.update(data);
-    let digest = inner.finalize();
-
-    let mut outer = <Hmac<Md5> as KeyInit>::new_from_slice(&ksign)
-        .map_err(|_| Error::Crypto("HMAC-MD5 signature key".into()))?;
-    outer.update(&digest);
-    Ok(outer.finalize().into_bytes().to_vec())
 }
 
 /// HMAC with the hash the enctype pairs with: SHA-1 for the two SHA1 enctypes,
@@ -682,13 +653,18 @@ mod tests {
         // `usage || data` gives a different answer, which is the mistake this
         // test exists to catch.
         let key = vec![0x07u8; 16];
-        let usage = KERB_NON_KERB_CKSUM_SALT.to_le_bytes();
+        let usage = KERB_NON_KERB_CKSUM_SALT;
         assert_eq!(
-            hmac_md5(&key, b"abc", &usage).unwrap(),
+            rrl_crypto::checksum::kerb_checksum_hmac_md5(&key, usage, b"abc").to_vec(),
             hex("1513dea61516575fc6535e6dc5c5ea32")
         );
         assert_eq!(
-            hmac_md5(&key, b"the quick brown fox jumps over the lazy dog", &usage).unwrap(),
+            rrl_crypto::checksum::kerb_checksum_hmac_md5(
+                &key,
+                usage,
+                b"the quick brown fox jumps over the lazy dog"
+            )
+            .to_vec(),
             hex("bae5498ab01bc241b86fa90b518a2392")
         );
     }

@@ -11,11 +11,10 @@ repository = "https://github.com/alexey-vostrikov/rrl-krb"
 # Key derivation and the profile: a PAC is signed with the same HMAC construction a ticket is,
 # so this crate sits on top of the crypto rather than beside it.
 rrl-crypto = { git = "https://github.com/alexey-vostrikov/rrl-crypto", branch = "main" }
-# The PAC's own signatures. `KERB_CHECKSUM_HMAC_MD5` is MD5 by protocol (MS-PAC §2.8), not by
-# choice, and the older AES signatures use HMAC-SHA1 — the same crates `rrl-crypto` already pulls,
-# so this adds no new tree.
+# The PAC's AES signatures use HMAC with the enctype's hash. The MD5 one — `KERB_CHECKSUM_HMAC_MD5`
+# — is not here: it comes from `rrl_crypto::checksum`, which owns the RFC 4757 §7.1 construction
+# that S4U needs too.
 hmac = "0.13"
-md-5 = "0.11"
 sha1 = "0.11"
 sha2 = "0.11"
 # A principal as `name@REALM` in JSON, which is how an administrator writes one.

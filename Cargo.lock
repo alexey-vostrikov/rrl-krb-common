@@ -182,7 +182,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 [[package]]
 name = "rrl-crypto"
 version = "0.1.0"
-source = "git+https://github.com/alexey-vostrikov/rrl-crypto?branch=main#7a416e202270224755cfa0884271435ea1fe33b6"
+source = "git+https://github.com/alexey-vostrikov/rrl-crypto?branch=main#20c04eb6212a22149cf7e49e1fe21850a3af042c"
 dependencies = [
  "aes",
  "getrandom",
@@ -200,7 +200,6 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "hmac",
- "md-5",
  "rrl-crypto",
  "serde",
  "sha1",
