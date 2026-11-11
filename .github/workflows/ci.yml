@@ -1,0 +1,79 @@
+name: ci
+
+# Everything compiles inside the toolchain image this repository builds itself
+# (`docker/toolchain.Dockerfile`): Rust 1.99.1 on Debian 11, glibc 2.31.
+#
+# Why CI builds the image instead of naming one: `rust:1.99.1-bullseye` does not exist on
+# Docker Hub — the official project stopped publishing bullseye variants after 1.90 — and the
+# tag that does exist, `rust:1.99.1-bookworm`, links against glibc 2.36. Tests passing there
+# would say nothing about the binary that has to start on a Debian 11 or Astra stand.
+#
+# The image file is shared byte for byte with rrl-kdc, rrl-crypto and rrl-krb5, and this
+# repository is the wire layer all of them link: a build that works here and not there is a
+# disagreement about the compiler, and the only thing that catches it is building from the same
+# text. The cost is one `docker build` per run, so the whole gate set is one job.
+#
+# `scripts/cargo.sh` runs the same image locally, so a developer and CI differ in nothing but
+# who started the container.
+on:
+  push:
+  pull_request:
+  # Run by hand from the Actions tab or `gh workflow run ci`. It exists because a fork's
+  # Actions are switched on after its first push, and a commit pushed while they were off
+  # never gets a run of its own: without this, the only way to see a green build is to push
+  # another commit.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: rust:1.99.1-bullseye
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      # Built from the repository, so a change to the toolchain is a reviewed diff rather than
+      # somebody's laptop.
+      - name: Build the toolchain image
+        run: docker build -t "$IMAGE" -f docker/toolchain.Dockerfile .
+
+      # The pin lives in `Cargo.toml`'s `rust-version`, which is what a consumer's resolver reads.
+      # The image has to agree with it: building with a different compiler than the one the
+      # repository declares is how a `cargo fmt --check` goes red for a reason nobody can
+      # reproduce.
+      - name: The toolchain matches the declared rust-version
+        run: |
+          declared=$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml)
+          actual=$(docker run --rm "$IMAGE" rustc --version | cut -d' ' -f2)
+          echo "declared=$declared actual=$actual"
+          test "$declared" = "$actual"
+
+      # The base is asserted, not assumed: this whole workflow exists because the glibc of the
+      # image is the glibc of the shipped binary.
+      - name: The base is bullseye
+        run: docker run --rm "$IMAGE" sh -c 'ldd --version | head -1 | grep -q 2\.31'
+
+      - name: rustfmt
+        run: ./scripts/cargo.sh fmt --all --check
+
+      # `-D warnings` rather than a tail of output: a warning nobody reads is a warning that
+      # becomes a defect. Every feature, because a feature that only compiles when somebody
+      # remembers to ask for it is a feature that stops compiling unnoticed.
+      - name: clippy
+        run: ./scripts/cargo.sh clippy --all-targets --all-features -- -D warnings
+
+      # The primary configuration: what a consumer gets by default.
+      - name: test
+        run: ./scripts/cargo.sh test
+
+      # Everything on: `serde`, which is what every message type needs before a JSON front end
+      # can touch it.
+      - name: test with every feature
+        run: ./scripts/cargo.sh test --all-features
