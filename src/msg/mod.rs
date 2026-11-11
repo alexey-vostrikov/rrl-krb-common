@@ -425,7 +425,12 @@ impl EncKdcRepPart {
                         .collect::<Vec<_>>(),
                 ),
             ),
-            der::field(2, der::int(self.nonce as i64)),
+            // Krb5Int32, not an unsigned value: a client that draws its nonce from a full u32
+            // sends the high half as a negative INTEGER, and Heimdal's decoder enforces the
+            // range. Encoding 0xb33a9901 as a positive 5-octet INTEGER made it answer
+            // "ASN.1 value too large" (asn1_err: OVERFLOW) and report it to the caller as
+            // "Failed to decode encpart in ticket" - a sentence about a ticket, for a reply.
+            der::field(2, der::int(i64::from(self.nonce as i32))),
         ];
         if let Some(exp) = self.key_expiration {
             parts.push(der::field(3, der::time(exp)));
@@ -974,6 +979,23 @@ mod tests {
         let as_rep = part.encode(ENC_AS_REP_PART);
         assert_eq!(as_rep[0], der::app(25));
         assert_eq!(EncKdcRepPart::decode(&as_rep).unwrap().nonce, 0xdead_beef);
+
+        // A nonce above INT32_MAX is what a client sends as a negative Krb5Int32, and Heimdal
+        // refuses the positive form: the octets have to be four, not five.
+        let mut high = EncKdcRepPart::decode(&as_rep).unwrap();
+        high.nonce = 0xb33a_9901;
+        let encoded = high.encode(crate::msg::ENC_TGS_REP_PART);
+        assert!(
+            encoded
+                .windows(6)
+                .any(|w| w == [0x02, 0x04, 0xb3, 0x3a, 0x99, 0x01]),
+            "the nonce must be a four-octet INTEGER: {encoded:02x?}"
+        );
+        assert_eq!(
+            EncKdcRepPart::decode(&encoded).unwrap().nonce,
+            0xb33a_9901,
+            "and it must survive the round trip"
+        );
         let tgs_rep = part.encode(ENC_TGS_REP_PART);
         assert_eq!(tgs_rep[0], der::app(26));
         assert_eq!(
