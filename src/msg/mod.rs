@@ -118,6 +118,15 @@ pub mod kdc_options {
     pub const VALIDATE: u32 = 0x0000_0001;
     /// `anonymous` (RFC 8062 §3, bit 16): ask for a ticket that names nobody.
     pub const ANONYMOUS: u32 = 0x0000_8000;
+    /// `renewable-ok` (bit 27): a lifetime cut short by policy may be made renewable instead of
+    /// simply shorter.
+    ///
+    /// Not in RFC 4120's own list, but in every implementation that has a per-principal maximum
+    /// lifetime: Heimdal reads it in `kdc/kerberos5.c`, and it is how a realm says "you asked for
+    /// ten hours, I give you one, and you may renew it back up to ten" rather than "you get one
+    /// hour and nothing else". Bit 27 in `KerberosFlags` numbering is `1 << (31 - 27)`, so
+    /// `0x0000_0010`.
+    pub const RENEWABLE_OK: u32 = 0x0000_0010;
     /// `disable-transited-check` (RFC 4120 §5.4.1, bit 26): the client asks the KDC not to
     /// check the transited path. Bit 26 in `KerberosFlags` numbering is `1 << (31 - 26)`.
     pub const DISABLE_TRANSITED_CHECK: u32 = 0x0000_0020;
@@ -841,6 +850,7 @@ mod tests {
             ("allow-postdate", kdc_options::ALLOW_POSTDATE, 5),
             ("postdated", kdc_options::POSTDATED, 6),
             ("renewable", kdc_options::RENEWABLE, 7),
+            ("renewable-ok", kdc_options::RENEWABLE_OK, 27),
             (
                 "disable-transited-check",
                 kdc_options::DISABLE_TRANSITED_CHECK,
