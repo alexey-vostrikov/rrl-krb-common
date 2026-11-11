@@ -118,8 +118,18 @@ pub mod kdc_options {
     pub const VALIDATE: u32 = 0x0000_0001;
     /// `anonymous` (RFC 8062 §3, bit 16): ask for a ticket that names nobody.
     pub const ANONYMOUS: u32 = 0x0000_8000;
-    /// `canonicalize` (RFC 6806 §3).
-    pub const CANONICALIZE: u32 = 0x0000_0020;
+    /// `disable-transited-check` (RFC 4120 §5.4.1, bit 26): the client asks the KDC not to
+    /// check the transited path. Bit 26 in `KerberosFlags` numbering is `1 << (31 - 26)`.
+    pub const DISABLE_TRANSITED_CHECK: u32 = 0x0000_0020;
+    /// `canonicalize` (RFC 6806 §3, bit 15): the client accepts a reply naming a principal
+    /// other than the one it asked for.
+    ///
+    /// Bit 15 in `KerberosFlags` numbering is `1 << (31 - 15)`, so `0x0001_0000`. It was
+    /// `0x0000_0020` — the mask of bit 26 — until the table test in this module existed to
+    /// say so: every other test in this crate read the constant rather than the bit, so the
+    /// mistake was invisible here and became visible only to a client that asked to
+    /// canonicalize and was heard as asking not to have the transited path checked.
+    pub const CANONICALIZE: u32 = 0x0001_0000;
 }
 
 /// `EncryptedData ::= SEQUENCE { etype [0], kvno [1] OPTIONAL, cipher [2] }`.
@@ -805,6 +815,83 @@ mod tests {
     use super::*;
     use crate::crypto::{Cipher, Enctype, OwnCipher, usage};
     use crate::error::codes;
+
+    /// `KerberosFlags` numbers its bits from the most significant bit of the first octet, so bit
+    /// `n` is `1 << (31 - n)`. Every option is pinned against the bit number the RFC gives it and
+    /// against nothing else.
+    ///
+    /// A mask one bit off round-trips through this crate's own tests perfectly: the encoder writes
+    /// it, the decoder reads it, and both sides use the same constant, so only a client from
+    /// another implementation can disagree. `canonicalize` was exactly that — declared with bit
+    /// 26's mask, which is `disable-transited-check`, so a stock client asking to canonicalize was
+    /// heard as asking not to have its transited path checked.
+    #[test]
+    fn the_options_pin_their_rfc_bit_numbers() {
+        let options = [
+            // RFC 4120 §5.4.1.
+            ("forwardable", kdc_options::FORWARDABLE, 1),
+            ("forwarded", kdc_options::FORWARDED, 2),
+            ("proxiable", kdc_options::PROXIABLE, 3),
+            ("proxy", kdc_options::PROXY, 4),
+            ("allow-postdate", kdc_options::ALLOW_POSTDATE, 5),
+            ("postdated", kdc_options::POSTDATED, 6),
+            ("renewable", kdc_options::RENEWABLE, 7),
+            (
+                "disable-transited-check",
+                kdc_options::DISABLE_TRANSITED_CHECK,
+                26,
+            ),
+            ("enc-tkt-in-skey", kdc_options::ENC_TKT_IN_SKEY, 28),
+            ("renew", kdc_options::RENEW, 30),
+            ("validate", kdc_options::VALIDATE, 31),
+            // Added by later documents, and numbered by them: RFC 6806 §3, RFC 6806 §11,
+            // RFC 8062 §3.
+            ("canonicalize", kdc_options::CANONICALIZE, 15),
+            ("cname-in-addl-tkt", kdc_options::CNAME_IN_ADDL_TKT, 14),
+            ("anonymous", kdc_options::ANONYMOUS, 16),
+        ];
+        for (name, mask, bit) in options {
+            assert_eq!(mask, 1u32 << (31 - bit), "KDC option {name} is bit {bit}");
+        }
+
+        // Not a property of the numbering but of the history: these two shared a mask, which is
+        // how the mistake below stayed invisible — a request carrying one was read as the other.
+        assert_ne!(
+            kdc_options::CANONICALIZE,
+            kdc_options::DISABLE_TRANSITED_CHECK,
+            "canonicalize is bit 15 and disable-transited-check is bit 26"
+        );
+    }
+
+    /// The ticket flags, on the same numbering: RFC 4120 §5.4.4 (bits 1 through 13) and the later
+    /// documents that add bit 15 (`enc-pa-rep`, RFC 6806 §11) and bit 16 (RFC 8062 §3).
+    #[test]
+    fn the_ticket_flags_pin_their_rfc_bit_numbers() {
+        let flags = [
+            ("forwardable", tkt_flags::FORWARDABLE, 1),
+            ("forwarded", tkt_flags::FORWARDED, 2),
+            ("proxiable", tkt_flags::PROXIABLE, 3),
+            ("proxy", tkt_flags::PROXY, 4),
+            ("may-postdate", tkt_flags::MAY_POSTDATE, 5),
+            ("postdated", tkt_flags::POSTDATED, 6),
+            ("invalid", tkt_flags::INVALID, 7),
+            ("renewable", tkt_flags::RENEWABLE, 8),
+            ("initial", tkt_flags::INITIAL, 9),
+            ("pre-authent", tkt_flags::PRE_AUTHENT, 10),
+            ("hw-authent", tkt_flags::HW_AUTHENT, 11),
+            (
+                "transited-policy-checked",
+                tkt_flags::TRANSITED_POLICY_CHECKED,
+                12,
+            ),
+            ("ok-as-delegate", tkt_flags::OK_AS_DELEGATE, 13),
+            ("enc-pa-rep", tkt_flags::ENC_PA_REP, 15),
+            ("anonymous", tkt_flags::ANONYMOUS, 16),
+        ];
+        for (name, mask, bit) in flags {
+            assert_eq!(mask, 1u32 << (31 - bit), "ticket flag {name} is bit {bit}");
+        }
+    }
 
     fn cipher() -> OwnCipher {
         OwnCipher
