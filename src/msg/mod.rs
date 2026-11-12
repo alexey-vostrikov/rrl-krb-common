@@ -9,7 +9,9 @@
 pub mod apreq;
 pub mod req;
 
-pub use apreq::{ApReq, Authenticator};
+// `AP_OPTS_MUTUAL_REQUIRED` with them: a server that reads `ApReq.ap_options` has to name the bit
+// it is looking at, and a literal `0x2000_0000` in a service is a bit nobody can check.
+pub use apreq::{AP_OPTS_MUTUAL_REQUIRED, ApReq, Authenticator};
 pub use req::{KdcReq, KdcReqBody};
 
 use crate::crypto::{Enctype, Key};
