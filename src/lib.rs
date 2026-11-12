@@ -28,6 +28,7 @@
 
 pub mod der;
 pub mod error;
+pub mod kx509;
 pub mod logon_info;
 pub mod msg;
 pub mod name;
