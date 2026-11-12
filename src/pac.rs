@@ -265,6 +265,9 @@ impl SignatureType {
             // because their numbers are not adjacent and their MAC lengths differ.
             Enctype::Aes128Sha256 => Some(SignatureType::HmacSha256_128Aes),
             Enctype::Aes256Sha384 => Some(SignatureType::HmacSha384_192Aes),
+            // The one the comment above has always named: an RC4 key signs a PAC with HMAC-MD5,
+            // which is how an AD domain's service tickets are signed when the account's key is RC4.
+            Enctype::Rc4Hmac => Some(SignatureType::HmacMd5),
         }
     }
 
@@ -295,8 +298,9 @@ impl SignatureType {
 
     /// The key enctype this signature is computed with, for the AES checksums.
     ///
-    /// `None` for HMAC-MD5, whose key is an RC4 key this crate does not implement;
-    /// the caller that reaches it has already decided the key is RC4.
+    /// `None` for HMAC-MD5, whose construction is not an HMAC over the enctype's key: it goes through
+    /// [`rrl_crypto::checksum::kerb_checksum_hmac_md5`], which is the function that exists for it, so
+    /// there is no enctype to name here.
     pub fn enctype(self) -> Option<Enctype> {
         match self {
             SignatureType::HmacSha1_96Aes(enctype) => Some(enctype),
@@ -460,6 +464,15 @@ fn hmac_for(enctype: Enctype, key: &[u8], data: &[u8]) -> Result<Vec<u8>> {
                 .map_err(|_| Error::Crypto("HMAC-SHA384 key".into()))?;
             m.update(data);
             m.finalize().into_bytes().to_vec()
+        }
+        // Not reached: HMAC-MD5 goes through `kerb_checksum_hmac_md5` in `sign`, because its
+        // construction is not an HMAC over this key. Refusing by name rather than falling back to
+        // SHA-1 keeps that path honest — a signature computed here would verify nowhere.
+        Enctype::Rc4Hmac => {
+            return Err(Error::Crypto(
+                "a PAC under an rc4-hmac key is signed through kerb_checksum_hmac_md5, not here"
+                    .into(),
+            ));
         }
     })
 }
