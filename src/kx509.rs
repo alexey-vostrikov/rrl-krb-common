@@ -282,11 +282,11 @@ fn octets_in(content: &[u8]) -> Result<Vec<u8>, Error> {
 }
 
 /// Whether two octet strings are equal, in time that does not depend on where they differ.
+///
+/// RRL-7.2: the comparison itself lives in the crypto layer, where the `black_box` that keeps an
+/// optimiser from reintroducing the early exit is written once.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    rrl_crypto::ct_eq(a, b)
 }
 
 /// The CSR out of a `Kx509CSRPlus`.
