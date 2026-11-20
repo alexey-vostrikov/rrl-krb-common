@@ -230,7 +230,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 [[package]]
 name = "rrl-crypto"
 version = "0.1.0"
-source = "git+https://github.com/alexey-vostrikov/rrl-crypto?branch=main#45c2248a9feab83acb5268f2c2ca80740ada3aec"
+source = "git+https://github.com/alexey-vostrikov/rrl-crypto?branch=main#89d668e7cb4eebf655925b42cf9af38095bdf181"
 dependencies = [
  "aes",
  "getrandom",
