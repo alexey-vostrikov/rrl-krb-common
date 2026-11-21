@@ -140,16 +140,22 @@ pub fn int(v: i64) -> Vec<u8> {
 ///
 /// `int` takes a signed 64-bit value, which is enough for every field of RFC 4120 and far from
 /// enough for a Diffie-Hellman prime: those are two octets short of two thousand.
+///
+/// The sign octet is decided by the first octet that survives trimming, not by the one that
+/// arrived. Before it was, a magnitude written with a redundant leading zero and a high second
+/// octet — `00 80` — came out as `80`, which is -128 rather than 128: the caller asked for a large
+/// positive number and got a small negative one, with nothing to say so.
 pub fn int_bytes(magnitude: &[u8]) -> Vec<u8> {
-    let trimmed = match magnitude.iter().position(|b| *b != 0) {
-        Some(0) if magnitude[0] & 0x80 != 0 => {
-            let mut out = vec![0x00];
-            out.extend_from_slice(magnitude);
-            return tlv(INTEGER, &out);
-        }
-        Some(start) => &magnitude[start..],
-        None => return tlv(INTEGER, &[0]),
+    let Some(start) = magnitude.iter().position(|b| *b != 0) else {
+        return tlv(INTEGER, &[0]);
     };
+    let trimmed = &magnitude[start..];
+    if trimmed[0] & 0x80 != 0 {
+        let mut out = Vec::with_capacity(trimmed.len() + 1);
+        out.push(0x00);
+        out.extend_from_slice(trimmed);
+        return tlv(INTEGER, &out);
+    }
     tlv(INTEGER, trimmed)
 }
 
@@ -911,6 +917,65 @@ mod tests {
         let mut r = Reader::new(&body);
         let f = Fields::parse("body", r.expect(SEQUENCE).unwrap()).unwrap();
         assert!(f.flags32(0, "body").is_err());
+    }
+
+    /// The text, because it is the only thing a person reading a log ever sees.
+    ///
+    /// `DerError`'s `Display` mutated to `Ok(Default::default())` and survived: every test on an
+    /// error stopped at `is_err()`. A decoder that reports nothing still returns `Err`, so this is
+    /// exactly the sort of hole a green suite hides.
+    #[test]
+    fn an_error_says_der_and_names_what_failed() {
+        let e =
+            err::<Vec<u8>>("EncTicketPart", "tag 0x61 where a SEQUENCE was expected").unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "DER: EncTicketPart: tag 0x61 where a SEQUENCE was expected"
+        );
+
+        // And through a real parse, not only the constructor.
+        let binding = octets(b"x");
+        let mut r = Reader::new(&binding);
+        let text = r.expect(SEQUENCE).unwrap_err().to_string();
+        assert!(text.starts_with("DER: "), "{text}");
+        assert!(text.contains("0x04"), "{text}");
+    }
+
+    /// `int_bytes` applies two rules that `int` cannot show, because `int` starts from a fixed-width
+    /// value: leading zero octets are dropped, and a sign octet is added exactly when the first
+    /// surviving octet has its top bit set.
+    ///
+    /// Nothing in the crate called `int_bytes` in a test, and every mutation of the guard survived:
+    /// `&` → `|` is always true, so every magnitude silently gained a sign octet; `!=` → `==` signs
+    /// only the magnitudes that do not need it; replacing the whole guard with `true` or `false`
+    /// picks one of those two behaviours for everything.
+    #[test]
+    fn int_bytes_trims_leading_octets_and_signs_only_what_needs_it() {
+        // Top bit clear: no sign octet.
+        assert_eq!(int_bytes(&[0x7f]), vec![0x02, 0x01, 0x7f]);
+        // Top bit set: one octet of sign, or the number turns negative.
+        assert_eq!(int_bytes(&[0x80]), vec![0x02, 0x02, 0x00, 0x80]);
+        assert_eq!(int_bytes(&[0xff, 0xff]), vec![0x02, 0x03, 0x00, 0xff, 0xff]);
+        // Leading zeros go, and what decides the sign is what remains — not what arrived. `00 80`
+        // is 128 and needs the sign octet even though the first octet given was zero.
+        assert_eq!(int_bytes(&[0x00, 0x7f]), vec![0x02, 0x01, 0x7f]);
+        assert_eq!(int_bytes(&[0x00, 0x80]), vec![0x02, 0x02, 0x00, 0x80]);
+        assert_eq!(int_bytes(&[0x00, 0x00, 0x01]), vec![0x02, 0x01, 0x01]);
+        // All zeros is the INTEGER zero: one octet, not an empty magnitude.
+        assert_eq!(int_bytes(&[0x00, 0x00]), vec![0x02, 0x01, 0x00]);
+        // A DH prime arrives as an OCTET STRING, often with a leading zero of its own; the sign
+        // octet is still what keeps it positive when it is read as a signed integer.
+        let mut prime = vec![0xffu8; 128];
+        prime[0] = 0x00;
+        let encoded = int_bytes(&prime);
+        assert_eq!(encoded[0], 0x02);
+        assert_eq!(
+            &encoded[1..3],
+            &[0x81, 0x80],
+            "128 octets of content is a long-form length"
+        );
+        assert_eq!(encoded[3], 0x00, "the sign octet leads");
+        assert_eq!(encoded.len(), 3 + 128);
     }
 
     #[test]
