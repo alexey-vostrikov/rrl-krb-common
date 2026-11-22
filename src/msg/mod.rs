@@ -1072,4 +1072,62 @@ mod tests {
         assert_eq!(md.len(), 1);
         assert_eq!(md[0].0, PA_ETYPE_INFO2);
     }
+
+    /// A reply's application tag comes from its message type, and the `PA-DATA` field is written
+    /// only when there is something to write.
+    ///
+    /// The two are separate statements and both were at zero: nothing built an `AS-REP` with no
+    /// pre-authentication data, which is what a KDC sends when the client is not asked for any, and
+    /// nothing read the tag back. A reply tagged `[13]` in answer to an `AS-REQ` is one a client
+    /// reads as a `TGS-REP` and then fails to match with its request.
+    #[test]
+    fn a_reply_is_tagged_by_its_message_type_and_omits_absent_padata() {
+        let ticket = Ticket {
+            realm: "R".into(),
+            sname: Principal::new(2, ["krbtgt", "R"], "R"),
+            enc: EncryptedData {
+                etype: Enctype::Aes256Sha384,
+                kvno: None,
+                cipher: vec![0xaa; 8],
+            },
+        };
+        let reply = |msg_type: i64, padata: Vec<(i32, Vec<u8>)>| KdcRep {
+            msg_type,
+            padata,
+            crealm: "R".into(),
+            cname: Principal::new(1, ["alice"], "R"),
+            ticket: ticket.clone(),
+            enc_part: EncryptedData {
+                etype: Enctype::Aes256Sha384,
+                kvno: Some(1),
+                cipher: vec![0xbb; 8],
+            },
+        };
+
+        // `[APPLICATION 11]` is AS-REP and `[APPLICATION 13]` is TGS-REP.
+        let as_rep = reply(AS_REP, Vec::new()).encode();
+        assert_eq!(as_rep[0], 0x6b, "AS-REP is [11]");
+        let tgs_rep = reply(TGS_REP, Vec::new()).encode();
+        assert_eq!(tgs_rep[0], 0x6d, "TGS-REP is [13]");
+
+        // Without PA-DATA the field is absent, so the reply carries six fields, not seven; with it,
+        // seven. Counted rather than searched for, because a zero-length `[2]` would also be found
+        // by a search and is not what an absent field looks like.
+        assert_eq!(
+            field_numbers(&as_rep),
+            [0, 1, 3, 4, 5, 6],
+            "no PA-DATA field"
+        );
+
+        let with = reply(AS_REP, vec![(2, vec![0x30, 0x00])]).encode();
+        assert_eq!(field_numbers(&with), [0, 1, 2, 3, 4, 5, 6]);
+    }
+
+    /// The field numbers present in a reply, read with the same `Fields` the decoder uses: the set
+    /// of context tags on the wire, in order.
+    fn field_numbers(reply: &[u8]) -> Vec<u8> {
+        let app_tag = reply[0] & 0x1f;
+        let f = crate::der::Fields::parse_app("KDC-REP", app_tag, reply).expect("the reply parses");
+        (0u8..=10).filter(|n| f.opt(*n).is_some()).collect()
+    }
 }

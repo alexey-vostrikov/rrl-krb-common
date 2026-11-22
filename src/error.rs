@@ -80,6 +80,11 @@ impl From<crate::crypto::Error> for Error {
             crate::crypto::Error::KeyLength { enctype, want, got } => {
                 Error::KeyLength { enctype, want, got }
             }
+            // The inner variant already carries its layer's name in its `Display`, and this enum's
+            // own `Display` writes "crypto: " in front of whatever arrives: passing the formatted
+            // error through produced "crypto: crypto: bad tag", which reads like two failures in a
+            // row. The detail is what belongs here; the prefix is written once, by the printer.
+            crate::crypto::Error::Crypto(detail) => Error::Crypto(detail),
             other => Error::Crypto(other.to_string()),
         }
     }
@@ -169,4 +174,105 @@ pub mod codes {
     pub const KRB_AP_ERR_TKT_INVALID: i32 = 49;
     /// A checksum that must be present is absent, or is of the wrong type.
     pub const KRB_AP_ERR_INAPP_CKSUM: i32 = 50;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every variant prints something that names its own failure.
+    ///
+    /// `Display` is the only account an operator gets when a message is refused: the protocol code
+    /// is a number, and the detail lives in this text. Three of the six arms had never been
+    /// formatted by a test, and one of them states a fact that moves - which enctypes this build
+    /// implements - so the text is pinned here rather than in a comment.
+    #[test]
+    fn every_variant_says_what_failed() {
+        let der = Error::Der(crate::der::DerError("Certificate: not a SEQUENCE".into()));
+        assert_eq!(der.to_string(), "DER: Certificate: not a SEQUENCE");
+
+        assert_eq!(
+            Error::UnsupportedEnctype(23).to_string(),
+            "enctype 23 is not one this implementation has (17, 18, 19, 20)"
+        );
+        assert_eq!(
+            Error::KeyLength {
+                enctype: crate::Enctype::Aes256Sha384,
+                want: 32,
+                got: 16,
+            }
+            .to_string(),
+            "enctype Aes256Sha384 takes a 32-octet key, got 16"
+        );
+        assert_eq!(
+            Error::Crypto("bad tag".into()).to_string(),
+            "crypto: bad tag"
+        );
+        assert_eq!(
+            Error::NotARequest("empty message".into()).to_string(),
+            "message is not a KDC-REQ: empty message"
+        );
+        assert_eq!(
+            Error::Protocol("pvno is 4".into()).to_string(),
+            "protocol: pvno is 4"
+        );
+    }
+
+    /// `source` answers with the cause it has and nothing more: a DER failure wraps one, and every
+    /// other variant is a statement of its own, not a wrapper.
+    #[test]
+    fn only_the_wrapped_error_reports_a_source() {
+        use std::error::Error as _;
+        let der = Error::Der(crate::der::DerError("Certificate: not a SEQUENCE".into()));
+        assert!(der.source().is_some(), "a DER failure has a cause");
+
+        for e in [
+            Error::UnsupportedEnctype(23),
+            Error::Crypto("bad tag".into()),
+            Error::NotARequest("empty message".into()),
+            Error::Protocol("pvno is 4".into()),
+        ] {
+            assert!(e.source().is_none(), "{e} is its own cause");
+        }
+    }
+
+    /// A crypto failure keeps the two variants the protocol code reads and flattens the rest.
+    ///
+    /// The difference is load-bearing: an unimplemented enctype answers `ETYPE_NOSUPP` and a failed
+    /// integrity check answers `BAD_INTEGRITY`, so a conversion that flattened everything to a
+    /// string would turn both into `KRB_ERR_GENERIC` without any test noticing.
+    #[test]
+    fn a_crypto_failure_keeps_the_variants_the_protocol_code_reads() {
+        let unsupported: Error = crate::crypto::Error::UnsupportedEnctype(21).into();
+        assert!(
+            matches!(unsupported, Error::UnsupportedEnctype(21)),
+            "{unsupported:?}"
+        );
+
+        let wrong: Error = crate::crypto::Error::KeyLength {
+            enctype: crate::Enctype::Aes128Sha256,
+            want: 16,
+            got: 32,
+        }
+        .into();
+        match wrong {
+            Error::KeyLength { want, got, .. } => assert_eq!((want, got), (16, 32)),
+            other => panic!("expected KeyLength, got {other:?}"),
+        }
+
+        let other: Error = crate::crypto::Error::Crypto("bad tag".into()).into();
+        assert_eq!(other.to_string(), "crypto: bad tag");
+
+        // The DER conversion is the plain one.
+        let der: Error = crate::der::DerError("Principal: bad name".into()).into();
+        assert!(matches!(der, Error::Der(_)), "{der:?}");
+    }
+
+    /// `protocol()` names the context it was given, and returns an error rather than a value: it
+    /// exists so a call site does not have to build the `format!` itself.
+    #[test]
+    fn protocol_names_the_context() {
+        let e = protocol::<()>("KDC-REQ-BODY", "field 2 is absent").unwrap_err();
+        assert_eq!(e.to_string(), "protocol: KDC-REQ-BODY: field 2 is absent");
+    }
 }
