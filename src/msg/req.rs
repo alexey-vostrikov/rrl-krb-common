@@ -10,7 +10,7 @@ use crate::der::{self, Fields, Reader};
 use crate::error::{Error, Result};
 use crate::name::Principal;
 
-use super::{AS_REQ, PVNO, TGS_REQ, decode_pa_data};
+use super::{AS_REQ, TGS_REQ};
 
 /// A `KDC-REQ`: an `AS-REQ` or a `TGS-REQ`.
 #[derive(Clone, Debug)]
@@ -58,6 +58,22 @@ pub struct KdcReqBody {
     pub additional_tickets: Option<Vec<u8>>,
 }
 
+/// Which request the octets claim to be: its application tag and the message type that goes with it.
+///
+/// A `TGS-REQ` arriving at the AS port is refused here, by tag, rather than answered with whatever
+/// the body happens to decode to — the tag and the body agree or the message is not a request this
+/// implementation serves.
+fn request_kind(data: &[u8]) -> Result<(u8, i64)> {
+    match data.first() {
+        Some(0x6a) => Ok((10, AS_REQ)),
+        Some(0x6c) => Ok((12, TGS_REQ)),
+        Some(&other) => Err(Error::NotARequest(format!(
+            "application tag {other:#04x}; expected AS-REQ (0x6a) or TGS-REQ (0x6c)"
+        ))),
+        None => Err(Error::NotARequest("empty message".into())),
+    }
+}
+
 impl KdcReq {
     /// Decodes a whole `[APPLICATION 10]` / `[APPLICATION 12]` request.
     ///
@@ -65,44 +81,18 @@ impl KdcReq {
     /// the AS port is refused here rather than answered with something it did
     /// not ask for.
     pub fn decode(data: &[u8]) -> Result<Self> {
-        let first = *data
-            .first()
-            .ok_or_else(|| Error::NotARequest("empty message".into()))?;
-        let (app_tag, msg_type) = match first {
-            0x6a => (10u8, AS_REQ),
-            0x6c => (12u8, TGS_REQ),
-            other => {
-                return Err(Error::NotARequest(format!(
-                    "application tag {other:#04x}; expected AS-REQ (0x6a) or TGS-REQ (0x6c)"
-                )));
-            }
-        };
+        let (app_tag, msg_type) = request_kind(data)?;
         let f = Fields::parse_app("KDC-REQ", app_tag, data)?;
-        let pvno = f.int(1, "KDC-REQ")?;
-        if pvno != PVNO {
-            return Err(Error::Protocol(format!(
-                "KDC-REQ pvno is {pvno}, RFC 4120 says 5"
-            )));
-        }
-        let declared = f.int(2, "KDC-REQ")?;
-        if declared != msg_type {
-            return Err(Error::Protocol(format!(
-                "KDC-REQ msg-type is {declared} but the application tag says {msg_type}"
-            )));
-        }
-        let padata = match f.opt(3) {
-            None => Vec::new(),
-            Some(_) => {
-                let mut r = Reader::new(f.bytes(3, "KDC-REQ")?);
-                decode_pa_data("KDC-REQ", r.expect_in("KDC-REQ", der::SEQUENCE)?)?
-            }
-        };
+        super::expect_pvno(&f, "KDC-REQ", 1)?;
+        super::expect_msg_type(&f, "KDC-REQ", 2, msg_type)?;
+        // The body is kept as it arrived — the whole `KDC-REQ-BODY` SEQUENCE, tag and length
+        // included — because a client's PA-FX-FAST checksum is over exactly those octets, and the
+        // decoder is handed the content inside them instead.
         let raw_body = f.bytes(4, "KDC-REQ")?.to_vec();
-        let mut r = Reader::new(&raw_body);
-        let content = r.expect_in("KDC-REQ-BODY", der::SEQUENCE)?;
+        let content = super::sequence_at(&f, 4, "KDC-REQ")?;
         Ok(KdcReq {
             msg_type,
-            padata,
+            padata: super::pa_data_at(&f, 3, "KDC-REQ")?,
             body: KdcReqBody::decode(content)?,
             raw_body,
         })
@@ -120,49 +110,77 @@ impl KdcReq {
 impl KdcReqBody {
     /// Decodes the content of a `KDC-REQ-BODY` SEQUENCE.
     pub fn decode(content: &[u8]) -> Result<Self> {
-        let ctx = "KDC-REQ-BODY";
+        let ctx: &'static str = "KDC-REQ-BODY";
         let f = Fields::parse(ctx, content)?;
-        let kdc_options = f.flags32(0, ctx)?;
         let realm = f.string(2, ctx)?;
-        let cname = match f.opt(1) {
-            None => None,
-            Some(_) => Some(Principal::decode_field(&f, 1, ctx, &realm)?),
-        };
-        let sname = match f.opt(3) {
-            None => None,
-            Some(_) => Some(Principal::decode_field(&f, 3, ctx, &realm)?),
-        };
-        let from = f
-            .opt(4)
-            .map(|_| super::as_time(ctx, f.bytes(4, ctx).unwrap()))
-            .transpose()?;
-        let till = super::as_time(ctx, f.bytes(5, ctx)?)?;
-        let rtime = f
-            .opt(6)
-            .map(|_| super::as_time(ctx, f.bytes(6, ctx).unwrap()))
-            .transpose()?;
-        let nonce = f.u32(7, ctx)?;
-        let mut r = Reader::new(f.bytes(8, ctx)?);
-        let mut s = Reader::new(r.expect_in(ctx, der::SEQUENCE)?);
-        let mut etypes = Vec::new();
-        while !s.is_empty() {
-            etypes.push(der::as_int(ctx, s.expect_in(ctx, der::INTEGER)?)? as i32);
-        }
+        let w = window(&f, ctx)?;
         Ok(KdcReqBody {
-            kdc_options,
-            cname,
+            kdc_options: f.flags32(0, ctx)?,
+            cname: opt_principal(&f, 1, ctx, &realm)?,
+            sname: opt_principal(&f, 3, ctx, &realm)?,
             realm,
-            sname,
-            from,
-            till,
-            rtime,
-            nonce,
-            etypes,
-            addresses: f.bytes(9, ctx).ok().map(<[u8]>::to_vec),
-            enc_authorization_data: f.opt_bytes(10).map(<[u8]>::to_vec),
-            additional_tickets: f.opt_bytes(11).map(<[u8]>::to_vec),
+            from: w.from,
+            till: w.till,
+            rtime: w.rtime,
+            nonce: w.nonce,
+            etypes: w.etypes,
+            addresses: w.addresses,
+            enc_authorization_data: w.enc_authorization_data,
+            additional_tickets: w.additional_tickets,
         })
     }
+}
+
+/// A principal the client may or may not have named.
+fn opt_principal(
+    f: &Fields<'_>,
+    tag: u8,
+    ctx: &'static str,
+    realm: &str,
+) -> Result<Option<Principal>> {
+    match f.opt(tag) {
+        None => Ok(None),
+        Some(_) => Ok(Some(Principal::decode_field(f, tag, ctx, realm)?)),
+    }
+}
+
+/// What the request asks for in time, in tickets, and in enctypes.
+///
+/// These fields travel together — a start time without the end time it is measured against says
+/// nothing — so they are read in one place and handed over as one value, rather than as eight
+/// separate reads inside the decoder.
+struct Window {
+    from: Option<i64>,
+    till: i64,
+    rtime: Option<i64>,
+    nonce: u32,
+    etypes: Vec<i32>,
+    addresses: Option<Vec<u8>>,
+    enc_authorization_data: Option<Vec<u8>>,
+    additional_tickets: Option<Vec<u8>>,
+}
+
+fn window(f: &Fields<'_>, ctx: &'static str) -> Result<Window> {
+    Ok(Window {
+        from: super::opt_time(f, 4, ctx)?,
+        till: super::as_time(ctx, f.bytes(5, ctx)?)?,
+        rtime: super::opt_time(f, 6, ctx)?,
+        nonce: f.u32(7, ctx)?,
+        etypes: etypes_at(f, ctx)?,
+        addresses: f.bytes(9, ctx).ok().map(<[u8]>::to_vec),
+        enc_authorization_data: f.opt_bytes(10).map(<[u8]>::to_vec),
+        additional_tickets: f.opt_bytes(11).map(<[u8]>::to_vec),
+    })
+}
+
+/// The `SEQUENCE OF Int32` of enctypes, in the order the client prefers them.
+fn etypes_at(f: &Fields<'_>, ctx: &'static str) -> Result<Vec<i32>> {
+    let mut r = Reader::new(super::sequence_at(f, 8, ctx)?);
+    let mut etypes = Vec::new();
+    while !r.is_empty() {
+        etypes.push(der::as_int(ctx, r.expect_in(ctx, der::INTEGER)?)? as i32);
+    }
+    Ok(etypes)
 }
 
 #[cfg(test)]

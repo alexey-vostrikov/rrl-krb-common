@@ -326,53 +326,33 @@ impl EncTicketPart {
     /// by tests that check what the KDC put in a ticket.
     pub fn decode(data: &[u8]) -> Result<Self> {
         let f = Fields::parse_app("EncTicketPart", ENC_TICKET_PART, data)?;
-        let flags = f.flags32(0, "EncTicketPart")?;
-        let mut r = Reader::new(f.bytes(1, "EncTicketPart")?);
-        let session_key = decode_key(r.expect_in("EncTicketPart", der::SEQUENCE)?)?;
-        let crealm = f.string(2, "EncTicketPart")?;
-        let cname = Principal::decode_field(&f, 3, "EncTicketPart.cname", &crealm)?;
-        let mut tr = Reader::new(f.bytes(4, "EncTicketPart")?);
-        let tf = Fields::parse(
-            "TransitedEncoding",
-            tr.expect_in("TransitedEncoding", der::SEQUENCE)?,
-        )?;
-        let transited_type = tf.int(0, "TransitedEncoding")? as i32;
-        let transited = tf.octets(1, "TransitedEncoding")?.to_vec();
-        let authtime = as_time("EncTicketPart.authtime", f.bytes(5, "EncTicketPart")?)?;
-        let starttime = f
-            .opt(6)
-            .map(|_| {
-                as_time(
-                    "EncTicketPart.starttime",
-                    f.bytes(6, "EncTicketPart").unwrap(),
-                )
-            })
-            .transpose()?;
-        let endtime = as_time("EncTicketPart.endtime", f.bytes(7, "EncTicketPart")?)?;
-        let renew_till = f
-            .opt(8)
-            .map(|_| {
-                as_time(
-                    "EncTicketPart.renew-till",
-                    f.bytes(8, "EncTicketPart").unwrap(),
-                )
-            })
-            .transpose()?;
+        let v = validity(&f, "EncTicketPart")?;
+        let (crealm, cname) = client(&f, "EncTicketPart.cname", 2, 3)?;
+        let (transited_type, transited) = transited(&f)?;
         Ok(EncTicketPart {
-            flags,
-            session_key,
+            flags: f.flags32(0, "EncTicketPart")?,
+            session_key: key_at(&f, 1, "EncTicketPart")?,
             crealm,
             cname,
             transited_type,
             transited,
-            authtime,
-            starttime,
-            endtime,
-            renew_till,
+            authtime: v.authtime,
+            starttime: v.starttime,
+            endtime: v.endtime,
+            renew_till: v.renew_till,
             caddr: f.opt_bytes(9).map(<[u8]>::to_vec),
             authorization_data: f.opt_bytes(10).map(<[u8]>::to_vec),
         })
     }
+}
+
+/// `TransitedEncoding`: the encoding type and the realms passed through.
+fn transited(f: &Fields<'_>) -> Result<(i32, Vec<u8>)> {
+    let t = Fields::parse("TransitedEncoding", sequence_at(f, 4, "TransitedEncoding")?)?;
+    Ok((
+        t.int(0, "TransitedEncoding")? as i32,
+        t.octets(1, "TransitedEncoding")?.to_vec(),
+    ))
 }
 
 /// `EncKDCRepPart` — the plaintext of an `EncASRepPart` or `EncTGSRepPart`.
@@ -469,71 +449,69 @@ impl EncKdcRepPart {
     /// Decodes an `EncASRepPart` / `EncTGSRepPart`: what a client does with
     /// the encrypted half, and what the tests use to check the KDC.
     pub fn decode(data: &[u8]) -> Result<Self> {
-        let tag = match data.first() {
-            Some(&t) if t == der::app(ENC_AS_REP_PART) || t == der::app(ENC_TGS_REP_PART) => t,
-            _ => {
-                return Err(Error::Protocol(
-                    "enc-part is not an EncKDCRepPart (application 25 or 26)".into(),
-                ));
-            }
-        };
-        let app_tag = tag & 0x1f;
-        let f = Fields::parse_app("EncKDCRepPart", app_tag, data)?;
-        let mut r = Reader::new(f.bytes(0, "EncKDCRepPart")?);
-        let session_key = decode_key(r.expect_in("EncKDCRepPart", der::SEQUENCE)?)?;
-        let mut lr = Reader::new(f.bytes(1, "EncKDCRepPart")?);
-        let lr_seq = lr.expect_in("LastReq", der::SEQUENCE)?;
-        let mut lrs = Reader::new(lr_seq);
-        let mut last_req = Vec::new();
-        while !lrs.is_empty() {
-            let e = Fields::parse("LastReq", lrs.expect_in("LastReq", der::SEQUENCE)?)?;
-            last_req.push((
-                e.int(0, "LastReq")? as i32,
-                as_time("LastReq", e.bytes(1, "LastReq")?)?,
-            ));
-        }
-        let nonce = f.u32(2, "EncKDCRepPart")?;
-        let key_expiration = f
-            .opt(3)
-            .map(|_| as_time("key-expiration", f.bytes(3, "EncKDCRepPart").unwrap()))
-            .transpose()?;
-        let flags = f.flags32(4, "EncKDCRepPart")?;
-        let authtime = as_time("authtime", f.bytes(5, "EncKDCRepPart")?)?;
-        let starttime = f
-            .opt(6)
-            .map(|_| as_time("starttime", f.bytes(6, "EncKDCRepPart").unwrap()))
-            .transpose()?;
-        let endtime = as_time("endtime", f.bytes(7, "EncKDCRepPart")?)?;
-        let renew_till = f
-            .opt(8)
-            .map(|_| as_time("renew-till", f.bytes(8, "EncKDCRepPart").unwrap()))
-            .transpose()?;
-        let srealm = f.string(9, "EncKDCRepPart")?;
-        let sname = Principal::decode_field(&f, 10, "EncKDCRepPart.sname", &srealm)?;
+        let f = Fields::parse_app("EncKDCRepPart", enc_part_tag(data)?, data)?;
+        let v = validity(&f, "EncKDCRepPart")?;
+        let (srealm, sname) = client(&f, "EncKDCRepPart.sname", 9, 10)?;
+        let n = numbers(&f)?;
+        let e = extras(&f)?;
         Ok(EncKdcRepPart {
-            session_key,
-            last_req,
-            nonce,
-            key_expiration,
-            flags,
-            authtime,
-            starttime,
-            endtime,
-            renew_till,
+            session_key: key_at(&f, 0, "EncKDCRepPart")?,
+            last_req: last_req(&f)?,
+            nonce: n.nonce,
+            key_expiration: n.key_expiration,
+            flags: n.flags,
+            authtime: v.authtime,
+            starttime: v.starttime,
+            endtime: v.endtime,
+            renew_till: v.renew_till,
             srealm,
             sname,
-            caddr: f.opt_bytes(11).map(<[u8]>::to_vec),
-            padata: match f.opt(12) {
-                None => Vec::new(),
-                Some(_) => {
-                    let mut r = Reader::new(f.bytes(12, "EncKDCRepPart")?);
-                    decode_pa_data(
-                        "EncKDCRepPart",
-                        r.expect_in("EncKDCRepPart", der::SEQUENCE)?,
-                    )?
-                }
-            },
+            caddr: e.caddr,
+            padata: e.padata,
         })
+    }
+}
+
+/// What a reply carries beyond the ticket itself: the client addresses it is bound to, and the
+/// `PA-DATA` the client needs to make sense of it. Both are optional in practice, which is why they
+/// are read apart from the fields a client cannot do without.
+struct Extras {
+    caddr: Option<Vec<u8>>,
+    padata: Vec<(i32, Vec<u8>)>,
+}
+
+fn extras(f: &Fields<'_>) -> Result<Extras> {
+    Ok(Extras {
+        caddr: f.opt_bytes(11).map(<[u8]>::to_vec),
+        padata: pa_data_at(f, 12, "EncKDCRepPart")?,
+    })
+}
+
+/// The numbers a reply echoes and grants: the nonce it answers, when the client's key expires, and
+/// the option flags the ticket came with. They are not a time window and do not belong with one.
+struct Numbers {
+    nonce: u32,
+    key_expiration: Option<i64>,
+    flags: u32,
+}
+
+fn numbers(f: &Fields<'_>) -> Result<Numbers> {
+    Ok(Numbers {
+        nonce: f.u32(2, "EncKDCRepPart")?,
+        key_expiration: opt_time(f, 3, "key-expiration")?,
+        flags: f.flags32(4, "EncKDCRepPart")?,
+    })
+}
+
+/// The application tag of an `EncKDCRepPart`: 25 for an AS reply, 26 for a TGS reply.
+fn enc_part_tag(data: &[u8]) -> Result<u8> {
+    match data.first() {
+        Some(&t) if t == der::app(ENC_AS_REP_PART) || t == der::app(ENC_TGS_REP_PART) => {
+            Ok(t & 0x1f)
+        }
+        _ => Err(Error::Protocol(
+            "enc-part is not an EncKDCRepPart (application 25 or 26)".into(),
+        )),
     }
 }
 
@@ -681,42 +659,22 @@ impl KrbError {
     /// the tests do to check that the KDC answered with the right code.
     pub fn decode(data: &[u8]) -> Result<Self> {
         let f = Fields::parse_app("KRB-ERROR", KRB_ERROR, data)?;
-        let ctime = f
-            .opt(2)
-            .map(|_| as_time("ctime", f.bytes(2, "KRB-ERROR").unwrap()))
-            .transpose()?;
-        let cusec = f.opt(3).map(|_| f.u32(3, "KRB-ERROR")).transpose()?;
-        let stime = as_time("stime", f.bytes(4, "KRB-ERROR")?)?;
-        let susec = f.u32(5, "KRB-ERROR")?;
-        let code = f.int(6, "KRB-ERROR")? as i32;
-        let crealm = f.opt_string(7, "KRB-ERROR")?;
-        let cname = match (&crealm, f.opt(8)) {
-            (Some(r), Some(_)) => Some(Principal::decode_field(&f, 8, "cname", r)?),
-            _ => None,
-        };
+        let (crealm, cname) = optional_client(&f, "KRB-ERROR")?;
         let realm = f.string(9, "KRB-ERROR")?;
-        let sname = Principal::decode_field(&f, 10, "sname", &realm)?;
-        let padata = match f.opt_bytes(13) {
-            None => Vec::new(),
-            Some(raw) => {
-                let mut r = crate::der::Reader::new(raw);
-                let seq = r.next_tlv("KRB-ERROR padata")?;
-                decode_pa_data("KRB-ERROR", seq.content)?
-            }
-        };
+        let (ctime, cusec, stime, susec) = error_times(&f)?;
         Ok(KrbError {
             ctime,
             cusec,
             stime,
             susec,
-            code,
+            code: f.int(6, "KRB-ERROR")? as i32,
             crealm,
             cname,
+            sname: Principal::decode_field(&f, 10, "sname", &realm)?,
             realm,
-            sname,
             e_text: f.opt_string(11, "KRB-ERROR")?,
             e_data: f.opt_octets(12, "KRB-ERROR")?.map(<[u8]>::to_vec),
-            padata,
+            padata: pa_data_at(&f, 13, "KRB-ERROR")?,
         })
     }
 
@@ -816,6 +774,146 @@ pub fn as_time(context: &'static str, content: &[u8]) -> Result<i64> {
     let text = der::as_string(context, r.expect_in(context, der::GENERALIZED_TIME)?)?;
     crate::time::parse_generalized_time(&text)
         .ok_or_else(|| Error::Protocol(format!("{context}: {text:?} is not a KerberosTime")))
+}
+
+/// The content of the `SEQUENCE` in context field `tag`.
+///
+/// Six decoders opened a field, made a `Reader` and took the inner `SEQUENCE` by hand; each did it
+/// with its own `?`, which is a decision in the complexity count and a line that says the same thing
+/// as five others.
+fn sequence_at<'a>(f: &Fields<'a>, tag: u8, what: &'static str) -> Result<&'a [u8]> {
+    let mut r = Reader::new(f.bytes(tag, what)?);
+    Ok(r.expect_in(what, der::SEQUENCE)?)
+}
+
+/// A `KerberosTime` in context field `tag`, when the field is present.
+///
+/// The optional times were written as `f.opt(n).map(|_| as_time(…, f.bytes(n).unwrap()))`, where the
+/// `unwrap` is safe only because `opt` just said the field is there — and where a reader has to
+/// check that pairing before trusting it. Here the check is the shape of the function.
+fn opt_time(f: &Fields<'_>, tag: u8, what: &'static str) -> Result<Option<i64>> {
+    match f.opt(tag) {
+        None => Ok(None),
+        Some(_) => Ok(Some(as_time(what, f.bytes(tag, what)?)?)),
+    }
+}
+
+/// A `Key` (an `EncryptionKey` SEQUENCE) in context field `tag`.
+fn key_at(f: &Fields<'_>, tag: u8, what: &'static str) -> Result<Key> {
+    decode_key(sequence_at(f, tag, what)?)
+}
+
+/// `PA-DATA` in context field `tag`: the list, or nothing when the field is absent.
+fn pa_data_at(f: &Fields<'_>, tag: u8, what: &'static str) -> Result<Vec<(i32, Vec<u8>)>> {
+    match f.opt_bytes(tag) {
+        None => Ok(Vec::new()),
+        Some(raw) => decode_pa_data(what, Reader::new(raw).expect_in(what, der::SEQUENCE)?),
+    }
+}
+
+/// `pvno` must be 5: RFC 4120 has one protocol version and this crate speaks it.
+///
+/// The field number is a parameter because the messages do not agree on it: `AP-REQ` puts `pvno`
+/// first and `KDC-REQ` puts it second, after nothing — the two structures are laid out differently
+/// even though every one of them opens with the same version.
+fn expect_pvno(f: &Fields<'_>, what: &'static str, tag: u8) -> Result<()> {
+    let pvno = f.int(tag, what)?;
+    if pvno == PVNO {
+        return Ok(());
+    }
+    Err(Error::Protocol(format!(
+        "{what} pvno is {pvno}, RFC 4120 says {PVNO}"
+    )))
+}
+
+/// The message type the field declares must be the one the application tag announced.
+///
+/// A disagreement is not a detail to resolve in favour of one of them: it means the octets are not
+/// the message they claim, and answering it with a body read from a different structure is how a
+/// client is told something it never asked for.
+fn expect_msg_type(f: &Fields<'_>, what: &'static str, tag: u8, want: i64) -> Result<()> {
+    let declared = f.int(tag, what)?;
+    if declared == want {
+        return Ok(());
+    }
+    Err(Error::Protocol(format!(
+        "{what} msg-type is {declared} but the application tag says {want}"
+    )))
+}
+
+/// The window a ticket or a reply describes: when it starts, ends, and may be renewed.
+struct Validity {
+    authtime: i64,
+    starttime: Option<i64>,
+    endtime: i64,
+    renew_till: Option<i64>,
+}
+
+/// The four times `EncTicketPart` and `EncKDCRepPart` both carry, at the same numbers (5 to 8).
+fn validity(f: &Fields<'_>, what: &'static str) -> Result<Validity> {
+    Ok(Validity {
+        authtime: as_time(what, f.bytes(5, what)?)?,
+        starttime: opt_time(f, 6, what)?,
+        endtime: as_time(what, f.bytes(7, what)?)?,
+        renew_till: opt_time(f, 8, what)?,
+    })
+}
+
+/// A client named by `crealm` and `cname`, which sit at different numbers in different messages.
+fn client(
+    f: &Fields<'_>,
+    what: &'static str,
+    realm_tag: u8,
+    name_tag: u8,
+) -> Result<(String, Principal)> {
+    let realm = f.string(realm_tag, what)?;
+    let name = Principal::decode_field(f, name_tag, what, &realm)?;
+    Ok((realm, name))
+}
+
+/// The client of a `KRB-ERROR`, both halves or neither.
+///
+/// The RFC makes `cname` depend on `crealm`: a name without its realm is not a name this crate can
+/// read, and a realm without a name is a claim about nobody. Half a client is therefore no client,
+/// which is one statement rather than the two the decoder used to make.
+fn optional_client(
+    f: &Fields<'_>,
+    what: &'static str,
+) -> Result<(Option<String>, Option<Principal>)> {
+    let crealm = f.opt_string(7, what)?;
+    let cname = match (&crealm, f.opt(8)) {
+        (Some(realm), Some(_)) => Some(Principal::decode_field(f, 8, what, realm)?),
+        _ => None,
+    };
+    Ok((crealm, cname))
+}
+
+/// The two clocks a `KRB-ERROR` carries: the client's, when it sent one, and the KDC's.
+///
+/// They are read together because they are read for the same purpose — a client compares them to
+/// decide whether its clock is wrong — and because each pair is a time and the microseconds inside
+/// that second, which are meaningless apart.
+fn error_times(f: &Fields<'_>) -> Result<(Option<i64>, Option<u32>, i64, u32)> {
+    Ok((
+        opt_time(f, 2, "ctime")?,
+        f.opt(3).map(|_| f.u32(3, "KRB-ERROR")).transpose()?,
+        as_time("stime", f.bytes(4, "KRB-ERROR")?)?,
+        f.u32(5, "KRB-ERROR")?,
+    ))
+}
+
+/// The `LastReq` list: (lr-type, lr-value) pairs.
+fn last_req(f: &Fields<'_>) -> Result<Vec<(i32, i64)>> {
+    let mut r = Reader::new(sequence_at(f, 1, "LastReq")?);
+    let mut pairs = Vec::new();
+    while !r.is_empty() {
+        let e = Fields::parse("LastReq", r.expect_in("LastReq", der::SEQUENCE)?)?;
+        pairs.push((
+            e.int(0, "LastReq")? as i32,
+            as_time("LastReq", e.bytes(1, "LastReq")?)?,
+        ));
+    }
+    Ok(pairs)
 }
 
 /// The error a request that names an unimplemented feature gets.

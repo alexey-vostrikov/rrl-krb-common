@@ -10,11 +10,11 @@
 //! bits of it (`use-session-key`, `mutual-required`) and rejects nothing.
 
 use crate::crypto::Key;
-use crate::der::{self, Fields, Reader};
-use crate::error::{Error, Result};
+use crate::der::{self, Fields};
+use crate::error::Result;
 use crate::name::Principal;
 
-use super::{EncryptedData, Ticket, as_time, decode_key, encode_key};
+use super::{EncryptedData, Ticket, as_time, encode_key};
 
 /// `AP-REQ`, `[APPLICATION 14]`.
 pub const AP_REQ: u8 = 14;
@@ -60,29 +60,15 @@ impl ApReq {
     /// Decodes a whole `[APPLICATION 14]` message.
     pub fn decode(data: &[u8]) -> Result<Self> {
         let f = Fields::parse_app("AP-REQ", AP_REQ, data)?;
-        let pvno = f.int(0, "AP-REQ")?;
-        if pvno != super::PVNO {
-            return Err(Error::Protocol(format!(
-                "AP-REQ pvno is {pvno}, RFC 4120 says 5"
-            )));
-        }
-        let msg_type = f.int(1, "AP-REQ")?;
-        if msg_type != AP_REQ as i64 {
-            return Err(Error::Protocol(format!(
-                "AP-REQ msg-type is {msg_type}, expected {AP_REQ}"
-            )));
-        }
-        let ap_options = f.flags32(2, "AP-REQ")?;
-        let ticket = f.bytes(3, "AP-REQ")?.to_vec();
-        let mut r = Reader::new(f.bytes(4, "AP-REQ")?);
-        let authenticator = EncryptedData::decode_content(
-            "AP-REQ.authenticator",
-            r.expect_in("AP-REQ", der::SEQUENCE)?,
-        )?;
+        super::expect_pvno(&f, "AP-REQ", 0)?;
+        super::expect_msg_type(&f, "AP-REQ", 1, AP_REQ as i64)?;
         Ok(ApReq {
-            ap_options,
-            ticket,
-            authenticator,
+            ap_options: f.flags32(2, "AP-REQ")?,
+            ticket: f.bytes(3, "AP-REQ")?.to_vec(),
+            authenticator: EncryptedData::decode_content(
+                "AP-REQ.authenticator",
+                super::sequence_at(&f, 4, "AP-REQ")?,
+            )?,
         })
     }
 
@@ -156,45 +142,49 @@ impl Authenticator {
     /// Decodes a whole `[APPLICATION 2]` message.
     pub fn decode(data: &[u8]) -> Result<Self> {
         let f = Fields::parse_app("Authenticator", AUTHENTICATOR, data)?;
-        let crealm = f.string(1, "Authenticator")?;
-        let cname = Principal::decode_field(&f, 2, "Authenticator.cname", &crealm)?;
-        let cksum = match f.opt(3) {
-            None => None,
-            Some(_) => {
-                let mut r = Reader::new(f.bytes(3, "Authenticator")?);
-                let cf = Fields::parse("Checksum", r.expect_in("Authenticator", der::SEQUENCE)?)?;
-                Some((
-                    cf.int(0, "Checksum")? as i32,
-                    cf.octets(1, "Checksum")?.to_vec(),
-                ))
-            }
-        };
-        let cusec = f.u32(4, "Authenticator")?;
-        let ctime = as_time("Authenticator.ctime", f.bytes(5, "Authenticator")?)?;
-        let subkey = match f.opt(6) {
-            None => None,
-            Some(_) => {
-                let mut r = Reader::new(f.bytes(6, "Authenticator")?);
-                Some(decode_key(r.expect_in("Authenticator", der::SEQUENCE)?)?)
-            }
-        };
+        let (crealm, cname) = super::client(&f, "Authenticator.cname", 1, 2)?;
         Ok(Authenticator {
             crealm,
             cname,
-            cksum,
-            cusec,
-            ctime,
-            subkey,
+            cksum: opt_checksum(&f)?,
+            cusec: f.u32(4, "Authenticator")?,
+            ctime: as_time("Authenticator.ctime", f.bytes(5, "Authenticator")?)?,
+            subkey: opt_subkey(&f)?,
             seq_number: f.opt_int(7, "Authenticator")?.map(|v| v as u32),
             authorization_data: f.opt_bytes(8).map(<[u8]>::to_vec),
         })
     }
 }
 
+/// The `Checksum`, when the request carries one.
+///
+/// Both halves are read together because a checksum is a pair: a type with no value cannot be
+/// checked, and the decoder used to answer `Some((type, value))` from two reads made at different
+/// depths of the same field.
+fn opt_checksum(f: &Fields<'_>) -> Result<Option<(i32, Vec<u8>)>> {
+    if f.opt(3).is_none() {
+        return Ok(None);
+    }
+    let c = Fields::parse("Checksum", super::sequence_at(f, 3, "Authenticator")?)?;
+    Ok(Some((
+        c.int(0, "Checksum")? as i32,
+        c.octets(1, "Checksum")?.to_vec(),
+    )))
+}
+
+/// The session subkey, when the request carries one.
+fn opt_subkey(f: &Fields<'_>) -> Result<Option<Key>> {
+    if f.opt(6).is_none() {
+        return Ok(None);
+    }
+    super::key_at(f, 6, "Authenticator").map(Some)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::crypto::{Cipher, Enctype, OwnCipher, usage};
+    use crate::der::Reader;
 
     fn authenticator() -> Authenticator {
         Authenticator {

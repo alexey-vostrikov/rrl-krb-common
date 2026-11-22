@@ -413,27 +413,54 @@ fn signature_slot(pac: &[u8], kind: u32, len: usize) -> Result<usize> {
 /// `(kind, cbBufferSize, offset)` for each buffer, or `None` when the table does
 /// not describe the buffer it arrived in.
 fn buffers_of(pac: &[u8]) -> Option<Vec<(u32, u32, usize)>> {
-    if pac.len() < 8 {
-        return None;
+    let count = buffer_count(pac)?;
+    let mut buffers = Vec::with_capacity(count);
+    for i in 0..count {
+        buffers.push(buffer_at(pac, i)?);
     }
-    let count = u32::from_le_bytes(pac[0..4].try_into().ok()?) as usize;
+    Some(buffers)
+}
+
+/// How many buffers the header declares, or `None` when it declares a table that cannot fit.
+///
+/// The two checks are one statement: the count is read only from a header long enough to hold it,
+/// and it is returned only when the table it describes fits inside the PAC. A count that overflows
+/// the multiplication is not a count, it is a stream that says nothing — which is why the arithmetic
+/// is checked rather than wrapped.
+fn buffer_count(pac: &[u8]) -> Option<usize> {
+    let header = pac.get(0..4)?;
+    let count = u32::from_le_bytes(header.try_into().ok()?) as usize;
     let table_end = 8usize.checked_add(count.checked_mul(16)?)?;
     if table_end > pac.len() {
         return None;
     }
-    let mut buffers = Vec::with_capacity(count);
-    for i in 0..count {
-        let at = 8 + i * 16;
-        let kind = u32::from_le_bytes(pac[at..at + 4].try_into().ok()?);
-        let size = u32::from_le_bytes(pac[at + 4..at + 8].try_into().ok()?);
-        let offset = u64::from_le_bytes(pac[at + 8..at + 16].try_into().ok()?);
-        let offset = usize::try_from(offset).ok()?;
-        if offset.checked_add(size as usize)? > pac.len() {
-            return None;
-        }
-        buffers.push((kind, size, offset));
+    Some(count)
+}
+
+/// The `i`-th buffer header: its type, its size and where its bytes start, all inside the PAC.
+fn buffer_at(pac: &[u8], i: usize) -> Option<(u32, u32, usize)> {
+    let at = 8usize.checked_add(i.checked_mul(16)?)?;
+    let kind = u32_at(pac, at)?;
+    let size = u32_at(pac, at + 4)?;
+    let offset = usize::try_from(u64_at(pac, at + 8)?).ok()?;
+    if offset.checked_add(size as usize)? > pac.len() {
+        return None;
     }
-    Some(buffers)
+    Some((kind, size, offset))
+}
+
+/// A little-endian `u32` at `at`, if the PAC is long enough to hold one there.
+fn u32_at(pac: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(pac.get(at..at + 4)?.try_into().ok()?))
+}
+
+/// A little-endian `u64` at `at`, if the PAC is long enough to hold one there.
+///
+/// The offset is eight octets rather than four because a PAC is written by the KDC and read by a
+/// client that may have been running long enough to see a PAC larger than four gigabytes; the
+/// conversion back to `usize` is where that promise meets this machine.
+fn u64_at(pac: &[u8], at: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(pac.get(at..at + 8)?.try_into().ok()?))
 }
 
 /// HMAC with the hash the enctype pairs with: SHA-1 for the two SHA1 enctypes,

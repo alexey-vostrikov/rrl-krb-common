@@ -184,44 +184,32 @@ impl Response {
 
     /// Decodes a `Kx509Response`.
     pub fn decode(data: &[u8]) -> Result<Response, Error> {
-        let mut r = der::Reader::new(data);
-        let seq = r
-            .next_tlv("Kx509Response")
-            .map_err(|e| Error::Malformed(format!("{e}")))?;
-        if seq.tag != der::SEQUENCE {
-            return Err(Error::Malformed("Kx509Response is not a SEQUENCE".into()));
-        }
-        let mut f = der::Reader::new(seq.content);
         let mut response = Response::default();
-        while !f.is_empty() {
-            let field = f
-                .next_tlv("field")
-                .map_err(|e| Error::Malformed(format!("{e}")))?;
-            match field.tag {
-                t if t == der::ctx(0) => {
-                    let mut inner = der::Reader::new(field.content);
-                    response.error_code = inner
-                        .int()
-                        .map_err(|e| Error::Malformed(format!("error-code: {e}")))?
-                        as i32;
-                }
-                t if t == der::ctx(1) => response.hash = Some(octets_in(field.content)?),
-                t if t == der::ctx(2) => response.certificate = Some(octets_in(field.content)?),
-                t if t == der::ctx(3) => {
-                    let mut inner = der::Reader::new(field.content);
-                    let text = inner
-                        .next_tlv("text")
-                        .map_err(|e| Error::Malformed(format!("text: {e}")))?;
-                    response.text = Some(String::from_utf8_lossy(text.content).into_owned());
-                }
-                // Not fatal: the ASN.1's CHOICE-style growth is not something a client should
-                // refuse a valid certificate over.
-                _ => {}
-            }
+        let mut fields = fields_of(data)?;
+        while !fields.is_empty() {
+            let field = fields.next_tlv("field").map_err(malformed)?;
+            response.take(field)?;
         }
         Ok(response)
     }
 
+    /// One field of the response, applied to itself.
+    ///
+    /// The loop above reads a field and hands it here, so the reader's job is "read the next one"
+    /// and this one's is "what does this one say" — two questions that were interleaved, which is
+    /// how a decoder grows a branch per field and a depth per branch.
+    fn take(&mut self, field: der::Tlv<'_>) -> Result<(), Error> {
+        match field.tag {
+            t if t == der::ctx(0) => self.error_code = error_code(field.content)?,
+            t if t == der::ctx(1) => self.hash = Some(octets_in(field.content)?),
+            t if t == der::ctx(2) => self.certificate = Some(octets_in(field.content)?),
+            t if t == der::ctx(3) => self.text = Some(text_in(field.content)?),
+            // Not fatal: the ASN.1's CHOICE-style growth is not something a client should refuse a
+            // valid certificate over.
+            _ => {}
+        }
+        Ok(())
+    }
     /// `HMAC-SHA1(session_key, version || error-code || certificate)`.
     ///
     /// The certificate enters as its own DER. A response that failed has no certificate, and the
@@ -267,6 +255,37 @@ fn int_content(v: i32) -> Vec<u8> {
 }
 
 /// The OCTET STRING inside a constructed field.
+/// The `SEQUENCE` this response is, checked to be one.
+fn fields_of(data: &[u8]) -> Result<der::Reader<'_>, Error> {
+    let mut r = der::Reader::new(data);
+    let seq = r.next_tlv("Kx509Response").map_err(malformed)?;
+    if seq.tag != der::SEQUENCE {
+        return Err(Error::Malformed("Kx509Response is not a SEQUENCE".into()));
+    }
+    Ok(der::Reader::new(seq.content))
+}
+
+/// A failure while reading a response, named by where it happened.
+fn malformed(e: der::DerError) -> Error {
+    Error::Malformed(format!("{e}"))
+}
+
+/// The error code, which is an `INTEGER` inside its own context tag.
+fn error_code(content: &[u8]) -> Result<i32, Error> {
+    der::Reader::new(content)
+        .int()
+        .map(|v| v as i32)
+        .map_err(|e| Error::Malformed(format!("error-code: {e}")))
+}
+
+/// The human-readable text, which is the content of an inner TLV.
+fn text_in(content: &[u8]) -> Result<String, Error> {
+    let text = der::Reader::new(content)
+        .next_tlv("text")
+        .map_err(|e| Error::Malformed(format!("text: {e}")))?;
+    Ok(String::from_utf8_lossy(text.content).into_owned())
+}
+
 fn octets_in(content: &[u8]) -> Result<Vec<u8>, Error> {
     let mut r = der::Reader::new(content);
     let inner = r
@@ -467,5 +486,34 @@ mod tests {
         let bare = der::seq(&[der::seq(&[der::int(1)])]);
         let err = csr_from_plus(&bare).expect_err("a bare key is refused");
         assert!(err.to_string().contains("private half"), "{err}");
+    }
+
+    /// A field this version does not know is skipped, not refused.
+    ///
+    /// RFC 6717 leaves the response open to growth, and a client that rejected a certificate
+    /// because a newer server added a field would break on the day the server was upgraded — with
+    /// an error that says nothing about the field it did not understand. The arm that skips it was
+    /// the only one of the five nothing had ever entered.
+    #[test]
+    fn a_field_this_version_does_not_know_is_skipped() {
+        let known = Response {
+            error_code: 0,
+            hash: Some(vec![0xa1; 20]),
+            certificate: None,
+            text: Some("ok".into()),
+        };
+        // The same response with `[4]` appended, which no version of this protocol defines.
+        let mut fields = vec![
+            der::field(0, der::int(0)),
+            der::field(1, der::octets(&[0xa1; 20])),
+            der::field(3, der::tlv(0x1a, b"ok")),
+        ];
+        fields.push(der::field(4, der::octets(b"from the future")));
+
+        let decoded = Response::decode(&der::seq(&fields)).expect("an unknown field is not fatal");
+        assert_eq!(decoded.error_code, known.error_code);
+        assert_eq!(decoded.hash, known.hash);
+        assert_eq!(decoded.text, known.text);
+        assert_eq!(decoded.certificate, known.certificate);
     }
 }
