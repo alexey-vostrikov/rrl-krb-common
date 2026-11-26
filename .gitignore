@@ -1,3 +1,7 @@
 /target
 Cargo.lock.bak
 .metrics/
+# cargo-mutants writes its report here, and the next run rotates the previous one to
+# `mutants.out.old` instead of deleting it - so the pattern has to cover both, and anchored at the
+# root so a file called `mutants.out` deeper in the tree is not silently ignored.
+/mutants.out*
